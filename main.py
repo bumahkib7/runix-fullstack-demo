@@ -1,7 +1,6 @@
 """Runix Full-Stack Demo — FastAPI + PostgreSQL + Kafka proof-of-concept."""
 
 import os
-import asyncio
 import json
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
@@ -14,7 +13,6 @@ from pydantic import BaseModel
 DATABASE_URL = os.environ.get("DATABASE_URL", "")
 KAFKA_BROKER = os.environ.get("KAFKA_BROKER_URL", "")
 PORT = int(os.environ.get("PORT", 8080))
-
 
 # ─── DB helpers ──────────────────────────────────────────────
 pool: asyncpg.Pool | None = None
@@ -40,16 +38,17 @@ async def init_db():
 kafka_producer = None
 
 
-async def init_kafka():
+def init_kafka():
     global kafka_producer
     if not KAFKA_BROKER:
         return
     try:
-        from aiokafka import AIOKafkaProducer
-        # Strip kafka:// prefix if present
+        from kafka import KafkaProducer
         broker = KAFKA_BROKER.replace("kafka://", "")
-        kafka_producer = AIOKafkaProducer(bootstrap_servers=broker)
-        await kafka_producer.start()
+        kafka_producer = KafkaProducer(
+            bootstrap_servers=broker,
+            value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+        )
     except Exception as e:
         print(f"Kafka init failed (non-fatal): {e}")
 
@@ -58,10 +57,10 @@ async def init_kafka():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-    await init_kafka()
+    init_kafka()
     yield
     if kafka_producer:
-        await kafka_producer.stop()
+        kafka_producer.close()
     if pool:
         await pool.close()
 
@@ -96,7 +95,6 @@ async def root():
 @app.get("/health")
 async def health():
     checks = {"api": True}
-
     if pool:
         try:
             async with pool.acquire() as conn:
@@ -104,10 +102,8 @@ async def health():
             checks["database"] = True
         except Exception:
             checks["database"] = False
-
     if kafka_producer:
-        checks["kafka"] = kafka_producer._sender is not None
-
+        checks["kafka"] = True
     all_ok = all(checks.values())
     return {"healthy": all_ok, "checks": checks}
 
@@ -120,21 +116,18 @@ async def create_event(event: EventCreate):
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "INSERT INTO events (name, payload) VALUES ($1, $2) RETURNING *",
-            event.name,
-            json.dumps(event.payload),
+            event.name, json.dumps(event.payload),
         )
 
     # Publish to Kafka if connected
     if kafka_producer:
         try:
-            msg = json.dumps({"event": event.name, "payload": event.payload}).encode()
-            await kafka_producer.send_and_wait("runix-events", msg)
+            kafka_producer.send("runix-events", {"event": event.name, "payload": event.payload})
         except Exception as e:
             print(f"Kafka publish failed (non-fatal): {e}")
 
     return EventOut(
-        id=row["id"],
-        name=row["name"],
+        id=row["id"], name=row["name"],
         payload=json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"],
         created_at=row["created_at"].isoformat(),
     )
@@ -146,14 +139,11 @@ async def list_events(limit: int = 20):
         raise HTTPException(status_code=503, detail="Database not available")
 
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM events ORDER BY id DESC LIMIT $1", limit
-        )
+        rows = await conn.fetch("SELECT * FROM events ORDER BY id DESC LIMIT $1", limit)
 
     return [
         EventOut(
-            id=r["id"],
-            name=r["name"],
+            id=r["id"], name=r["name"],
             payload=json.loads(r["payload"]) if isinstance(r["payload"], str) else r["payload"],
             created_at=r["created_at"].isoformat(),
         )
@@ -163,13 +153,10 @@ async def list_events(limit: int = 20):
 
 @app.get("/info")
 async def info():
-    """Show infrastructure configuration (redacted)."""
     db_url = DATABASE_URL
     if db_url:
-        # Redact password
         parts = db_url.split("@")
         db_url = f"***@{parts[-1]}" if len(parts) > 1 else "configured"
-
     return {
         "database_url": db_url or "not set",
         "kafka_broker": KAFKA_BROKER or "not set",

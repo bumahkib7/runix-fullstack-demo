@@ -6,9 +6,3 @@ services:
     branch: master
     env:
       PORT: "8080"
-
-  - name: demo-db
-    type: postgresql
-
-  - name: demo-kafka
-    type: kafka
