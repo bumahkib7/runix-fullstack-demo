@@ -1,0 +1,14 @@
+name: fullstack-demo
+services:
+  - name: fullstack-api
+    type: web-service
+    repo: https://github.com/bumahkib7/runix-fullstack-demo
+    branch: master
+    env:
+      PORT: "8080"
+
+  - name: demo-db
+    type: postgresql
+
+  - name: demo-kafka
+    type: kafka
